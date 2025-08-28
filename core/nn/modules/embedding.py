@@ -1,5 +1,6 @@
 from core.nn.tensor_nn import Module
-from core.tensor import Tensor
+from core.tensor import Tensor, zeros
+import numpy as np
 
 
 class Embedding(Module):
@@ -12,7 +13,6 @@ class Embedding(Module):
         self.padding_idx = padding_idx
 
         # 初始化嵌入矩阵
-        import numpy as np
         self.weight = Tensor(
             np.random.normal(0, 1, (num_embeddings, embedding_dim)),
             requires_grad=True
@@ -27,7 +27,6 @@ class Embedding(Module):
         # input_ids shape: (batch_size, seq_len)
         # 返回 shape: (batch_size, seq_len, embedding_dim)
 
-        # 简单的索引操作来获取嵌入
         batch_size, seq_len = input_ids.shape
         embedded = []
 
@@ -38,28 +37,36 @@ class Embedding(Module):
                 sequence_embeddings.append(self.weight.data[idx])
             embedded.append(sequence_embeddings)
 
-        import numpy as np
         embedded_array = np.array(embedded)
-        result = Tensor(embedded_array, device=input_ids.device)
 
-        # 设置梯度计算
+        # 创建结果张量，正确设置计算图信息
+        result = Tensor(
+            embedded_array,
+            requires_grad=self.weight.requires_grad,
+            device=input_ids.device,
+            _children=(self.weight, input_ids),  # 依赖于权重和输入
+            _op='embedding'
+        )
+
+        # 设置反向传播函数
         if self.weight.requires_grad:
-            result.requires_grad = True
+            def _embedding_backward():
+                if result.grad is None:
+                    return
 
-            def backward_fn(grad):
-                # 嵌入层的反向传播需要将梯度累积到对应的嵌入向量上
-                weight_grad = np.zeros_like(self.weight.data)
+                # 初始化权重梯度（如果需要）
+                if self.weight.grad is None:
+                    self.weight.grad = zeros(*self.weight.shape, device=self.weight.device)
 
+                # 嵌入层的反向传播：将梯度累积到对应的嵌入向量上
                 for i in range(batch_size):
                     for j in range(seq_len):
                         idx = int(input_ids.data[i, j])
+                        # 跳过padding索引
                         if self.padding_idx is None or idx != self.padding_idx:
-                            weight_grad[idx] += grad.data[i, j]
+                            self.weight.grad.data[idx] += result.grad.data[i, j]
 
-                return weight_grad
-
-            result._backward_fn = backward_fn
-            result._parents = [self.weight]
+            result._backward = _embedding_backward
 
         return result
 

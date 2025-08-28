@@ -1,4 +1,4 @@
-from core.nn.module.conv import Conv2d
+from core.nn.modules.conv import Conv2d
 from core.nn.tensor_nn import Module, Dropout, Linear, ReLU, Adam, CrossEntropyLoss
 from core.tensor import Tensor, zeros, randn
 import numpy as np

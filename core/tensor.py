@@ -1504,111 +1504,83 @@ class Tensor:
     def maximum(self, other):
         """
         逐元素计算两个张量的最大值
-
-        Args:
-            other: 另一个张量或标量值
-
-        Returns:
-            新的张量，包含逐元素的最大值
         """
-        # 如果other不是Tensor，转换为Tensor
-        if not isinstance(other, Tensor):
-            if isinstance(other, (int, float)):
-                # 标量情况：创建相同形状的张量
-                other_data = np.full_like(self.data, other)
-                other = Tensor(other_data, device=self.device)
-            elif isinstance(other, (list, tuple, np.ndarray)):
-                other = Tensor(np.array(other), device=self.device)
-            else:
-                raise TypeError(f"Unsupported type for maximum operation: {type(other)}")
+        other = self._ensure_tensor(other)
+        xp = self._get_array_module()
 
-        # 确保设备兼容
-        if hasattr(other, 'device') and other.device != self.device:
-            other = other.to(self.device)
+        result_data = xp.maximum(self.data, other.data)
+        result = Tensor(
+            result_data,
+            requires_grad=self.requires_grad or other.requires_grad,
+            device=self.device,
+            _children=(self, other),
+            _op='maximum'
+        )
 
-        # 使用numpy的maximum函数进行逐元素比较
-        result_data = np.maximum(self.data, other.data)
-        result = Tensor(result_data, device=self.device)
-
-        # 如果需要梯度计算，设置反向传播函数
-        if self.requires_grad or (hasattr(other, 'requires_grad') and other.requires_grad):
-            result.requires_grad = True
-
-            def backward_fn(grad):
-                # maximum的梯度：哪个输入更大就传递给哪个
-                self_grad = None
-                other_grad = None
+        if self.requires_grad or other.requires_grad:
+            def _maximum_backward():
+                if result.grad is None:
+                    return
 
                 if self.requires_grad:
-                    # 对于self: 当self >= other时，梯度为grad，否则为0
-                    mask_self = (self.data >= other.data).astype(np.float32)
-                    self_grad = grad * mask_self
+                    if self.grad is None:
+                        self.grad = zeros(*self.shape, device=self.device)
+                    # 当 self >= other 时，梯度传递给 self
+                    mask_self = (self.data >= other.data).astype(self.dtype)
+                    self.grad.data += result.grad.data * mask_self
 
-                if hasattr(other, 'requires_grad') and other.requires_grad:
-                    # 对于other: 当other > self时，梯度为grad，否则为0
-                    mask_other = (other.data > self.data).astype(np.float32)
-                    other_grad = grad * mask_other
+                if other.requires_grad:
+                    if other.grad is None:
+                        other.grad = zeros(*other.shape, device=other.device)
+                    # 当 other > self 时，梯度传递给 other
+                    mask_other = (other.data > self.data).astype(self.dtype)
+                    other.grad.data += result.grad.data * mask_other
 
-                return self_grad, other_grad
-
-            result._backward_fn = backward_fn
-            result._parents = [self] + ([other] if hasattr(other, 'requires_grad') and other.requires_grad else [])
+            result._backward = _maximum_backward
 
         return result
 
-    # 类似地，你可能还需要minimum方法
+
     def minimum(self, other):
         """
         逐元素计算两个张量的最小值
-
-        Args:
-            other: 另一个张量或标量值
-
-        Returns:
-            新的张量，包含逐元素的最小值
         """
-        # 如果other不是Tensor，转换为Tensor
-        if not isinstance(other, Tensor):
-            if isinstance(other, (int, float)):
-                other_data = np.full_like(self.data, other)
-                other = Tensor(other_data, device=self.device)
-            elif isinstance(other, (list, tuple, np.ndarray)):
-                other = Tensor(np.array(other), device=self.device)
-            else:
-                raise TypeError(f"Unsupported type for minimum operation: {type(other)}")
+        other = self._ensure_tensor(other)
+        xp = self._get_array_module()
 
-        # 确保设备兼容
-        if hasattr(other, 'device') and other.device != self.device:
-            other = other.to(self.device)
+        result_data = xp.minimum(self.data, other.data)
+        result = Tensor(
+            result_data,
+            requires_grad=self.requires_grad or other.requires_grad,
+            device=self.device,
+            _children=(self, other),
+            _op='minimum'
+        )
 
-        # 使用numpy的minimum函数
-        result_data = np.minimum(self.data, other.data)
-        result = Tensor(result_data, device=self.device)
-
-        # 梯度计算
-        if self.requires_grad or (hasattr(other, 'requires_grad') and other.requires_grad):
-            result.requires_grad = True
-
-            def backward_fn(grad):
-                self_grad = None
-                other_grad = None
+        if self.requires_grad or other.requires_grad:
+            def _minimum_backward():
+                if result.grad is None:
+                    return
 
                 if self.requires_grad:
-                    # 对于self: 当self <= other时，梯度为grad，否则为0
-                    mask_self = (self.data <= other.data).astype(np.float32)
-                    self_grad = grad * mask_self
+                    if self.grad is None:
+                        self.grad = zeros(*self.shape, device=self.device)
+                    # 当 self <= other 时，梯度传递给 self
+                    mask_self = (self.data <= other.data).astype(self.dtype)
+                    self.grad.data += result.grad.data * mask_self
 
-                if hasattr(other, 'requires_grad') and other.requires_grad:
-                    # 对于other: 当other < self时，梯度为grad，否则为0
-                    mask_other = (other.data < self.data).astype(np.float32)
-                    other_grad = grad * mask_other
+                if other.requires_grad:
+                    if other.grad is None:
+                        other.grad = zeros(*other.shape, device=other.device)
+                    # 当 other < self 时，梯度传递给 other
+                    mask_other = (other.data < self.data).astype(self.dtype)
+                    other.grad.data += result.grad.data * mask_other
 
-                return self_grad, other_grad
-
-            result._backward_fn = backward_fn
-            result._parents = [self] + ([other] if hasattr(other, 'requires_grad') and other.requires_grad else [])
+            result._backward = _minimum_backward
 
         return result
+
+
 # ==================== 便利函数 ====================
 
 def tensor(data, requires_grad=False, device='cpu', dtype=np.float32):

@@ -39,7 +39,7 @@ class RNNCell(Module):
             weight.data = (np.random.uniform(-std, std, weight.shape)).astype(np.float32)
 
     def forward(self, input, hidden):
-        """前向传播
+        """前向传播，单向单层
 
         Args:
             input: 输入张量 (batch_size, input_size)
@@ -66,6 +66,7 @@ class RNNCell(Module):
         elif self.nonlinearity == 'relu':
             new_hidden = i_h.relu()
         else:
+            # 如果没有设置线性关系的话，rnn要抛出异常
             raise ValueError(f"Unknown nonlinearity: {self.nonlinearity}")
 
         return new_hidden
