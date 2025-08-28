@@ -470,7 +470,15 @@ class MSELoss(Loss):
 
 
 class CrossEntropyLoss(Loss):
-    """交叉熵损失（改进版本）"""
+    """多分类交叉熵损失函数
+
+    适用于多分类问题，自动应用softmax + logist
+    计算公式: CE = -log(softmax(logits)[target_class])
+
+    Args:
+        reduction: 'mean', 'sum', 'none'
+        ignore_index: 忽略的类别索引（可选）
+    """
 
     def __init__(self, reduction='mean'):
         super().__init__()
@@ -652,6 +660,17 @@ def init_weights(module, init_type='xavier'):
 
         if module.bias is not None:
             module.bias.data = np.zeros_like(module.bias.data)
+
+def init_weights(weight,in_features, out_features,init_type='xavier'):
+    """权重初始化"""
+    if init_type == 'xavier':
+        std = np.sqrt(2.0 / (in_features + out_features))
+        weight = np.random.randn(*weight.shape) * std
+    elif init_type == 'he':
+        std = np.sqrt(2.0 / in_features)
+        weight = np.random.randn(*weight.shape) * std
+    elif init_type == 'normal':
+        weight = np.random.randn(*weight.shape) * 0.01
 
 
 # ==================== 示例使用 ====================
