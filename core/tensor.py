@@ -229,7 +229,7 @@ class Tensor:
                 if self.grad is None:
                     self.grad = zeros(*self.shape, device=self.device)
                 if result.grad is not None:
-                    # d/dx(|x|) = sign(x), but 0 at x=0
+                    # d/dx(|x|) = sign(x), 但是如果 0 是 x=0
                     sign_data = xp.sign(self.data)
                     self.grad.data += result.grad.data * sign_data
 
@@ -379,6 +379,34 @@ class Tensor:
             xp = self._get_array_module()
             self.grad = Tensor(xp.zeros_like(self.data), device=self.device)
 
+    def expand(self, *sizes):
+        """
+        扩展张量到指定大小（不复制数据，使用广播）
+
+        Args:
+            *sizes: 目标大小
+
+        Returns:
+            Tensor: 扩展后的张量
+
+        Example:
+            >>> x = Tensor([[1], [2]])  # shape: (2, 1)
+            >>> y = x.expand(2, 3)      # shape: (2, 3)
+        """
+        if len(sizes) == 1 and isinstance(sizes[0], (list, tuple)):
+            sizes = sizes[0]
+
+        xp = self._get_array_module()
+
+        # 检查扩展的有效性
+        if len(sizes) < self.ndim:
+            raise ValueError(f"expand: target size ({len(sizes)}) must be >= source size ({self.ndim})")
+
+        # 对齐维度（在前面补1）
+        expanded_shape = list(sizes)
+        original_shape = list(self.shape)
+
+
     # ==================== 基础数学运算 ====================
 
     def __add__(self, other):
@@ -450,6 +478,10 @@ class Tensor:
         )
 
         def _backward():
+            # 首先确保out有梯度
+            if out.grad is None:
+                return  # 如果输出没有梯度，直接返回
+
             if self.requires_grad:
                 self._init_grad_if_needed()
                 grad = other.data * out.grad.data
@@ -520,6 +552,32 @@ class Tensor:
         """矩阵乘法操作符 @"""
         return self.matmul(other)
 
+    def __getitem__(self, key):
+        """张量索引操作"""
+        xp = self._get_array_module()
+        result_data = self.data[key]
+
+        out = Tensor(
+            result_data,
+            requires_grad=self.requires_grad,
+            device=self.device,
+            _children=(self,),
+            _op='getitem'
+        )
+
+        if self.requires_grad:
+            def _getitem_backward():
+                if self.grad is None:
+                    self.grad = zeros(*self.shape, device=self.device)
+                if out.grad is not None:
+                    grad_data = xp.zeros_like(self.data)
+                    grad_data[key] += out.grad.data
+                    self.grad.data += grad_data
+
+            out._backward = _getitem_backward
+
+        return out
+
     # ==================== 形状操作 ====================
 
     def reshape(self, *shape):
@@ -546,18 +604,53 @@ class Tensor:
         out._backward = _backward
         return out
 
-    def transpose(self, *axes):
-        """转置张量"""
+    def transpose(self, dim0=None, dim1=None):
+        """
+        转置张量
+
+        Args:
+            dim0: 第一个要交换的维度，如果为None则转置所有维度
+            dim1: 第二个要交换的维度，只在dim0不为None时使用
+
+        Returns:
+            转置后的张量
+
+        Examples:
+            # 交换两个指定维度（类似PyTorch）
+            tensor.transpose(1, 0)  # 交换维度1和0
+
+            # 转置所有维度（默认行为）
+            tensor.transpose()  # 完全转置
+        """
         xp = self._get_array_module()
-        if len(axes) == 0:
+
+        if dim0 is None and dim1 is None:
             # 默认转置最后两个维度
             if self.ndim < 2:
                 raise ValueError("transpose requires at least 2 dimensions")
             axes = list(range(self.ndim))
             axes[-2], axes[-1] = axes[-1], axes[-2]
-        elif len(axes) == 1:
-            axes = axes[0]
+        elif dim0 is not None and dim1 is not None:
+            # PyTorch风格：只交换两个指定的维度
+            # 转换负索引
+            dim0 = dim0 if dim0 >= 0 else dim0 + self.ndim
+            dim1 = dim1 if dim1 >= 0 else dim1 + self.ndim
 
+            # 检查维度有效性
+            if dim0 >= self.ndim or dim0 < 0:
+                raise ValueError(
+                    f"Dimension out of range (expected to be in range of [-{self.ndim}, {self.ndim - 1}], but got {dim0 - self.ndim if dim0 >= self.ndim else dim0})")
+            if dim1 >= self.ndim or dim1 < 0:
+                raise ValueError(
+                    f"Dimension out of range (expected to be in range of [-{self.ndim}, {self.ndim - 1}], but got {dim1 - self.ndim if dim1 >= self.ndim else dim1})")
+
+            # 创建轴序列，只交换指定的两个维度
+            axes = list(range(self.ndim))
+            axes[dim0], axes[dim1] = axes[dim1], axes[dim0]
+        else:
+            raise ValueError("transpose() takes either 0 or 2 positional arguments")
+
+        axes = tuple(axes)
         result_data = xp.transpose(self.data, axes)
 
         out = Tensor(
@@ -571,19 +664,60 @@ class Tensor:
         def _backward():
             if self.requires_grad:
                 self._init_grad_if_needed()
-                # 反向转置
-                inv_axes = [0] * len(axes)
-                for i, ax in enumerate(axes):
-                    inv_axes[ax] = i
-                self.grad.data += xp.transpose(out.grad.data, inv_axes)
+                # 反向转置：再次应用相同的转置来恢复原始形状
+                self.grad.data += xp.transpose(out.grad.data, axes)
 
         out._backward = _backward
         return out
+
+    # def transpose(self, *axes):
+    #     """转置张量"""
+    #     xp = self._get_array_module()
+    #
+    #     if len(axes) == 0:
+    #         # 默认转置最后两个维度
+    #         if self.ndim < 2:
+    #             raise ValueError("transpose requires at least 2 dimensions")
+    #         axes = list(range(self.ndim))
+    #         axes[-2], axes[-1] = axes[-1], axes[-2]
+    #     elif len(axes) == 1 and hasattr(axes[0], '__iter__'):
+    #         # 如果传入的是一个序列（如列表或元组）
+    #         axes = axes[0]
+    #     # 如果 len(axes) > 1，直接使用 axes（这是多个单独参数的情况）
+    #
+    #     result_data = xp.transpose(self.data, axes)
+    #
+    #     out = Tensor(
+    #         result_data,
+    #         requires_grad=self.requires_grad,
+    #         device=self.device,
+    #         _children=(self,),
+    #         _op='transpose'
+    #     )
+    #
+    #     def _backward():
+    #         if self.requires_grad:
+    #             self._init_grad_if_needed()
+    #             # 反向转置
+    #             inv_axes = [0] * len(axes)
+    #             for i, ax in enumerate(axes):
+    #                 inv_axes[ax] = i
+    #             self.grad.data += xp.transpose(out.grad.data, inv_axes)
+    #
+    #     out._backward = _backward
+    #     return out
 
     @property
     def T(self):
         """转置属性"""
         return self.transpose()
+
+    def item(self):
+        """返回张量中的单个标量值"""
+        if self.data.size == 1:
+            return self.data.item()  # 如果内部用numpy数组存储
+        else:
+            raise ValueError("只能对包含单个元素的张量调用item()")
 
     def sum(self, axis=None, keepdims=False):
         """求和操作"""
@@ -744,14 +878,14 @@ class Tensor:
         topo = []
         visited = set()
 
-        def build_topological_order(v):
+        def build_topo(v):
             if v not in visited:
                 visited.add(v)
                 for child in v._prev:
-                    build_topological_order(child)
+                    build_topo(child)
                 topo.append(v)
 
-        build_topological_order(self)
+        build_topo(self)
 
         # 初始化输出梯度
         xp = self._get_array_module()
@@ -766,6 +900,485 @@ class Tensor:
         if self.grad is not None:
             xp = self._get_array_module()
             self.grad.data = xp.zeros_like(self.grad.data)
+
+        # ==================== 基本运算符重载 ====================
+    # 为Tensor类补充的张量操作方法
+    def permute(self, *dims):
+        """
+        重新排列张量的维度
+
+        Args:
+            *dims: 新的维度顺序
+
+        Returns:
+            Tensor: 重新排列维度后的张量
+
+        Example:
+            >>> x = Tensor([[1, 2], [3, 4]])  # shape: (2, 2)
+            >>> y = x.permute(1, 0)  # shape: (2, 2), 转置
+        """
+        if len(dims) == 1 and isinstance(dims[0], (list, tuple)):
+            dims = dims[0]
+
+        if len(dims) != self.ndim:
+            raise ValueError(
+                f"Number of dimensions in permute ({len(dims)}) doesn't match tensor dimensions ({self.ndim})")
+
+        # 检查维度是否有效
+        dims = list(dims)
+        for i, dim in enumerate(dims):
+            if dim < 0:
+                dims[i] = self.ndim + dim
+            if not (0 <= dims[i] < self.ndim):
+                raise IndexError(f"Dimension {dim} is out of range for {self.ndim}D tensor")
+
+        # 检查是否有重复维度
+        if len(set(dims)) != len(dims):
+            raise ValueError("Repeated dimension in permute")
+
+        xp = self._get_array_module()
+        result_data = xp.transpose(self.data, dims)
+
+        out = Tensor(
+            result_data,
+            requires_grad=self.requires_grad,
+            device=self.device,
+            _children=(self,),
+            _op='permute'
+        )
+
+        if self.requires_grad:
+            def _permute_backward():
+                if self.grad is None:
+                    self.grad = zeros(*self.shape, device=self.device)
+                if out.grad is not None:
+                    # 反向permute：找到逆排列
+                    inv_dims = [0] * len(dims)
+                    for i, d in enumerate(dims):
+                        inv_dims[d] = i
+                    self.grad.data += xp.transpose(out.grad.data, inv_dims)
+
+            out._backward = _permute_backward
+
+        return out
+
+    def squeeze(self, dim=None):
+        """
+        移除长度为1的维度
+
+        Args:
+            dim: 要移除的维度，如果为None则移除所有长度为1的维度
+
+        Returns:
+            Tensor: 压缩后的张量
+
+        Example:
+            >>> x = Tensor([[[1], [2]]])  # shape: (1, 2, 1)
+            >>> y = x.squeeze()  # shape: (2,)
+            >>> z = x.squeeze(0)  # shape: (2, 1)
+        """
+        xp = self._get_array_module()
+
+        if dim is None:
+            # 移除所有长度为1的维度
+            result_data = xp.squeeze(self.data)
+            # 记录被移除的维度用于反向传播
+            squeezed_dims = [i for i, size in enumerate(self.shape) if size == 1]
+        else:
+            # 移除指定维度
+            if dim < 0:
+                dim = self.ndim + dim
+
+            if not (0 <= dim < self.ndim):
+                raise IndexError(f"Dimension {dim} is out of range for {self.ndim}D tensor")
+
+            if self.shape[dim] != 1:
+                raise RuntimeError(f"Cannot squeeze dimension {dim} with size {self.shape[dim]} != 1")
+
+            result_data = xp.squeeze(self.data, axis=dim)
+            squeezed_dims = [dim]
+
+        out = Tensor(
+            result_data,
+            requires_grad=self.requires_grad,
+            device=self.device,
+            _children=(self,),
+            _op='squeeze'
+        )
+
+        if self.requires_grad:
+            def _squeeze_backward():
+                if self.grad is None:
+                    self.grad = zeros(*self.shape, device=self.device)
+                if out.grad is not None:
+                    # 恢复被squeeze的维度
+                    grad_data = out.grad.data
+                    for dim in sorted(squeezed_dims):
+                        grad_data = xp.expand_dims(grad_data, axis=dim)
+                    self.grad.data += grad_data
+
+            out._backward = _squeeze_backward
+
+        return out
+
+    def unsqueeze(self, dim):
+        """
+        在指定位置添加长度为1的维度
+
+        Args:
+            dim: 要添加维度的位置
+
+        Returns:
+            Tensor: 添加维度后的张量
+
+        Example:
+            >>> x = Tensor([1, 2, 3])  # shape: (3,)
+            >>> y = x.unsqueeze(0)  # shape: (1, 3)
+            >>> z = x.unsqueeze(1)  # shape: (3, 1)
+        """
+        # 处理负数索引
+        if dim < 0:
+            dim = self.ndim + 1 + dim
+
+        if not (0 <= dim <= self.ndim):
+            raise IndexError(f"Dimension {dim} is out of range for {self.ndim}D tensor")
+
+        xp = self._get_array_module()
+        result_data = xp.expand_dims(self.data, axis=dim)
+
+        out = Tensor(
+            result_data,
+            requires_grad=self.requires_grad,
+            device=self.device,
+            _children=(self,),
+            _op='unsqueeze'
+        )
+
+        if self.requires_grad:
+            def _unsqueeze_backward():
+                if self.grad is None:
+                    self.grad = zeros(*self.shape, device=self.device)
+                if out.grad is not None:
+                    # 移除添加的维度
+                    self.grad.data += xp.squeeze(out.grad.data, axis=dim)
+
+            out._backward = _unsqueeze_backward
+
+        return out
+
+    def view(self, *shape):
+        """
+        改变张量形状（类似reshape，但要求内存连续）
+
+        Args:
+            *shape: 新的形状
+
+        Returns:
+            Tensor: 重新整形后的张量
+
+        Example:
+            >>> x = Tensor([[1, 2], [3, 4]])  # shape: (2, 2)
+            >>> y = x.view(4)  # shape: (4,)
+            >>> z = x.view(1, 4)  # shape: (1, 4)
+        """
+        if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
+            shape = shape[0]
+
+        # 计算总元素数
+        total_elements = self.size
+
+        # 处理-1（自动推断维度）
+        shape = list(shape)
+        auto_dim = -1
+        auto_dim_count = 0
+
+        for i, dim in enumerate(shape):
+            if dim == -1:
+                if auto_dim_count > 0:
+                    raise ValueError("Only one dimension can be inferred (-1)")
+                auto_dim = i
+                auto_dim_count += 1
+
+        if auto_dim != -1:
+            # 计算自动推断的维度大小
+            known_size = 1
+            for i, dim in enumerate(shape):
+                if i != auto_dim:
+                    known_size *= dim
+
+            if total_elements % known_size != 0:
+                raise ValueError(f"Cannot reshape tensor of size {total_elements} to shape {shape}")
+
+            shape[auto_dim] = total_elements // known_size
+
+        # 检查新形状的元素总数是否匹配
+        new_total = 1
+        for dim in shape:
+            new_total *= dim
+
+        if new_total != total_elements:
+            raise ValueError(f"Cannot reshape tensor of size {total_elements} to shape {shape}")
+
+        return self.reshape(*shape)
+
+    def cat(tensors, dim=0):
+        """
+        在指定维度上连接张量
+
+        Args:
+            tensors: 要连接的张量列表
+            dim: 连接的维度
+
+        Returns:
+            Tensor: 连接后的张量
+
+        Example:
+            >>> x = Tensor([[1, 2]])
+            >>> y = Tensor([[3, 4]])
+            >>> z = cat([x, y], dim=0)  # shape: (2, 2)
+        """
+        if not tensors:
+            raise ValueError("Cannot concatenate empty list of tensors")
+
+        if len(tensors) == 1:
+            return tensors[0]
+
+        # 确保所有输入都是Tensor
+        tensors = [t if isinstance(t, Tensor) else Tensor(t) for t in tensors]
+
+        # 获取第一个tensor的信息
+        first_tensor = tensors[0]
+        xp = first_tensor._get_array_module()
+        device = first_tensor.device
+
+        # 处理负数维度
+        if dim < 0:
+            dim = first_tensor.ndim + dim
+
+        if not (0 <= dim < first_tensor.ndim):
+            raise IndexError(f"Dimension {dim} is out of range for {first_tensor.ndim}D tensor")
+
+        # 检查所有张量的形状兼容性
+        for i, tensor in enumerate(tensors[1:], 1):
+            if tensor.ndim != first_tensor.ndim:
+                raise ValueError(f"All tensors must have the same number of dimensions. "
+                                 f"Tensor {i} has {tensor.ndim} dims, expected {first_tensor.ndim}")
+
+            for d in range(first_tensor.ndim):
+                if d != dim and tensor.shape[d] != first_tensor.shape[d]:
+                    raise ValueError(f"All tensors must have the same size in all dimensions except {dim}. "
+                                     f"Tensor {i} has size {tensor.shape[d]} in dim {d}, expected {first_tensor.shape[d]}")
+
+        # 确保所有张量在同一设备上
+        tensor_data = []
+        for tensor in tensors:
+            if tensor.device != device:
+                tensor = tensor.to(device)
+            tensor_data.append(tensor.data)
+
+        # 执行连接
+        result_data = xp.concatenate(tensor_data, axis=dim)
+
+        # 检查是否需要梯度
+        requires_grad = any(t.requires_grad for t in tensors)
+
+        out = Tensor(
+            result_data,
+            requires_grad=requires_grad,
+            device=device,
+            _children=tuple(tensors),
+            _op='cat'
+        )
+
+        if requires_grad:
+            def _cat_backward():
+                if out.grad is None:
+                    return
+
+                # 计算每个tensor在cat维度上的起始和结束位置
+                start_idx = 0
+                for tensor in tensors:
+                    if tensor.requires_grad:
+                        if tensor.grad is None:
+                            tensor.grad = zeros(*tensor.shape, device=tensor.device)
+
+                        end_idx = start_idx + tensor.shape[dim]
+
+                        # 使用切片提取对应的梯度
+                        slices = [slice(None)] * out.ndim
+                        slices[dim] = slice(start_idx, end_idx)
+
+                        tensor.grad.data += out.grad.data[tuple(slices)]
+                        start_idx = end_idx
+
+            out._backward = _cat_backward
+
+        return out
+
+    def __getitem__(self, key):
+        """
+        张量索引操作
+        支持多种索引方式：整数、切片、元组等
+
+        Args:
+            key: 索引键，可以是整数、切片、元组等
+
+        Returns:
+            Tensor: 索引后的张量
+
+        Examples:
+            >>> x = Tensor([[1, 2, 3], [4, 5, 6]])
+            >>> x[0]        # 第一行
+            >>> x[:, 1]     # 第二列
+            >>> x[0:2, 1:3] # 子矩阵
+            >>> x[(0, 1)]   # 元组索引
+        """
+        xp = self._get_array_module()
+
+        # 执行索引操作
+        result_data = self.data[key]
+
+        # 创建结果张量
+        out = Tensor(
+            result_data,
+            requires_grad=self.requires_grad,
+            device=self.device,
+            _children=(self,),
+            _op='getitem'
+        )
+
+        if self.requires_grad:
+            def _getitem_backward():
+                if self.grad is None:
+                    self.grad = zeros(*self.shape, device=self.device)
+                if out.grad is not None:
+                    # 创建与原张量同样形状的零张量
+                    grad_data = xp.zeros_like(self.data)
+                    # 将梯度加到对应的索引位置
+                    grad_data[key] += out.grad.data
+                    self.grad.data += grad_data
+
+            out._backward = _getitem_backward
+
+        return out
+
+    def __setitem__(self, key, value):
+        """
+        张量赋值操作
+
+        Args:
+            key: 索引键
+            value: 要赋值的数据
+        """
+        if isinstance(value, Tensor):
+            self.data[key] = value.data
+        else:
+            self.data[key] = value
+
+    def chunk(self, chunks, dim=0):
+        """
+        将张量分割成指定数量的块
+
+        Args:
+            chunks: 要分割的块数
+            dim: 分割的维度
+
+        Returns:
+            List[Tensor]: 分割后的张量列表
+
+        Example:
+            >>> x = Tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+            >>> chunks = x.chunk(2, dim=1)  # 分割成2块
+        """
+        if chunks <= 0:
+            raise ValueError(f"chunks must be positive, got {chunks}")
+
+        # 处理负数维度
+        if dim < 0:
+            dim = self.ndim + dim
+
+        if not (0 <= dim < self.ndim):
+            raise IndexError(f"Dimension {dim} is out of range for {self.ndim}D tensor")
+
+        size = self.shape[dim]
+        chunk_size = (size + chunks - 1) // chunks  # 向上取整
+
+        result = []
+        for i in range(chunks):
+            start = i * chunk_size
+            end = min((i + 1) * chunk_size, size)
+
+            if start >= size:
+                break
+
+            # 创建切片
+            slices = [slice(None)] * self.ndim
+            slices[dim] = slice(start, end)
+
+            # 使用索引操作
+            chunk_tensor = self[tuple(slices)]
+            result.append(chunk_tensor)
+
+        return result
+
+    def split(self, split_size_or_sections, dim=0):
+        """
+        将张量分割成指定大小的块
+
+        Args:
+            split_size_or_sections: 分割大小或分割点列表
+            dim: 分割的维度
+
+        Returns:
+            List[Tensor]: 分割后的张量列表
+
+        Example:
+            >>> x = Tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+            >>> splits = x.split(2, dim=1)  # 每块大小为2
+            >>> splits = x.split([1, 3], dim=1)  # 指定每块的大小
+        """
+        # 处理负数维度
+        if dim < 0:
+            dim = self.ndim + dim
+
+        if not (0 <= dim < self.ndim):
+            raise IndexError(f"Dimension {dim} is out of range for {self.ndim}D tensor")
+
+        size = self.shape[dim]
+
+        if isinstance(split_size_or_sections, int):
+            # 均匀分割
+            split_size = split_size_or_sections
+            if split_size <= 0:
+                raise ValueError(f"split_size must be positive, got {split_size}")
+
+            sections = []
+            start = 0
+            while start < size:
+                end = min(start + split_size, size)
+                sections.append(end - start)
+                start = end
+        else:
+            # 按指定大小分割
+            sections = list(split_size_or_sections)
+            if sum(sections) != size:
+                raise ValueError(f"Sum of sections ({sum(sections)}) doesn't equal tensor size ({size}) in dim {dim}")
+
+        result = []
+        start = 0
+        for section_size in sections:
+            end = start + section_size
+
+            # 创建切片
+            slices = [slice(None)] * self.ndim
+            slices[dim] = slice(start, end)
+
+            # 使用索引操作
+            section_tensor = self[tuple(slices)]
+            result.append(section_tensor)
+            start = end
+
+        return result
 
     # ==================== 其他运算符重载 ====================
 
@@ -814,13 +1427,188 @@ class Tensor:
         return self * other
 
     def __repr__(self):
-        # return f"Tensor(data={self.data},grad={self.grad},shape={self.shape}, dtype={self.dtype}, device={self.device}, requires_grad={self.requires_grad})\n{self.data}"
-        return f"\nNode(当前的权重={self.data},grad={self.grad.data}"
+        return f"Tensor(data={self.data},grad={self.grad},shape={self.shape}, dtype={self.dtype}, device={self.device}, requires_grad={self.requires_grad})\n{self.data}"
+        # return f"\nNode(当前的权重={self.data},grad={self.grad.data}"
 
     def __str__(self):
         return self.__repr__()
 
+    def tolist(self):
+        """
+        将张量数据转换为 Python 原生列表（list）
 
+        适配逻辑：
+        - 若数据在 GPU（CuPy 数组），先转为 CPU 上的 NumPy 数组
+        - 再调用数组的 tolist() 方法，确保输出为 Python 原生列表
+        - 保持原始数据的维度结构（如二维张量转二维列表）
+
+        Returns:
+            list: 与张量形状一致的 Python 原生列表
+        """
+        # 1. 先确保数据在 CPU 上（CuPy 数组需转 NumPy）
+        if self.device == 'cuda' and CUDA_AVAILABLE and isinstance(self.data, cp.ndarray):
+            # GPU 数据转 CPU 的 NumPy 数组
+            cpu_data = cp.asnumpy(self.data)
+        else:
+            # CPU 数据直接使用（已为 NumPy 数组）
+            cpu_data = self.data
+
+        # 2. 调用 NumPy 数组的 tolist() 转为 Python 列表
+        return cpu_data.tolist()
+
+    def stack(tensors, dim=0):
+        """
+        在新维度上堆叠张量
+
+        Args:
+            tensors: 要堆叠的张量列表
+            dim: 新维度的位置
+
+        Returns:
+            Tensor: 堆叠后的张量
+
+        Example:
+            >>> x = Tensor([1, 2])
+            >>> y = Tensor([3, 4])
+            >>> z = stack([x, y], dim=0)  # shape: (2, 2)
+        """
+        if not tensors:
+            raise ValueError("Cannot stack empty list of tensors")
+
+        if len(tensors) == 1:
+            return tensors[0].unsqueeze(dim)
+
+        # 确保所有输入都是Tensor
+        tensors = [t if isinstance(t, Tensor) else Tensor(t) for t in tensors]
+
+        # 检查所有张量的形状是否相同
+        first_shape = tensors[0].shape
+        for i, tensor in enumerate(tensors[1:], 1):
+            if tensor.shape != first_shape:
+                raise ValueError(f"All tensors must have the same shape. "
+                                 f"Tensor {i} has shape {tensor.shape}, expected {first_shape}")
+
+        # 处理负数维度
+        ndim_new = tensors[0].ndim + 1
+        if dim < 0:
+            dim = ndim_new + dim
+
+        if not (0 <= dim < ndim_new):
+            raise IndexError(f"Dimension {dim} is out of range for {ndim_new}D tensor")
+
+        # 在指定维度上为每个tensor添加一个维度，然后连接
+        unsqueezed_tensors = [tensor.unsqueeze(dim) for tensor in tensors]
+        return cat(unsqueezed_tensors, dim=dim)
+
+
+    def maximum(self, other):
+        """
+        逐元素计算两个张量的最大值
+
+        Args:
+            other: 另一个张量或标量值
+
+        Returns:
+            新的张量，包含逐元素的最大值
+        """
+        # 如果other不是Tensor，转换为Tensor
+        if not isinstance(other, Tensor):
+            if isinstance(other, (int, float)):
+                # 标量情况：创建相同形状的张量
+                other_data = np.full_like(self.data, other)
+                other = Tensor(other_data, device=self.device)
+            elif isinstance(other, (list, tuple, np.ndarray)):
+                other = Tensor(np.array(other), device=self.device)
+            else:
+                raise TypeError(f"Unsupported type for maximum operation: {type(other)}")
+
+        # 确保设备兼容
+        if hasattr(other, 'device') and other.device != self.device:
+            other = other.to(self.device)
+
+        # 使用numpy的maximum函数进行逐元素比较
+        result_data = np.maximum(self.data, other.data)
+        result = Tensor(result_data, device=self.device)
+
+        # 如果需要梯度计算，设置反向传播函数
+        if self.requires_grad or (hasattr(other, 'requires_grad') and other.requires_grad):
+            result.requires_grad = True
+
+            def backward_fn(grad):
+                # maximum的梯度：哪个输入更大就传递给哪个
+                self_grad = None
+                other_grad = None
+
+                if self.requires_grad:
+                    # 对于self: 当self >= other时，梯度为grad，否则为0
+                    mask_self = (self.data >= other.data).astype(np.float32)
+                    self_grad = grad * mask_self
+
+                if hasattr(other, 'requires_grad') and other.requires_grad:
+                    # 对于other: 当other > self时，梯度为grad，否则为0
+                    mask_other = (other.data > self.data).astype(np.float32)
+                    other_grad = grad * mask_other
+
+                return self_grad, other_grad
+
+            result._backward_fn = backward_fn
+            result._parents = [self] + ([other] if hasattr(other, 'requires_grad') and other.requires_grad else [])
+
+        return result
+
+    # 类似地，你可能还需要minimum方法
+    def minimum(self, other):
+        """
+        逐元素计算两个张量的最小值
+
+        Args:
+            other: 另一个张量或标量值
+
+        Returns:
+            新的张量，包含逐元素的最小值
+        """
+        # 如果other不是Tensor，转换为Tensor
+        if not isinstance(other, Tensor):
+            if isinstance(other, (int, float)):
+                other_data = np.full_like(self.data, other)
+                other = Tensor(other_data, device=self.device)
+            elif isinstance(other, (list, tuple, np.ndarray)):
+                other = Tensor(np.array(other), device=self.device)
+            else:
+                raise TypeError(f"Unsupported type for minimum operation: {type(other)}")
+
+        # 确保设备兼容
+        if hasattr(other, 'device') and other.device != self.device:
+            other = other.to(self.device)
+
+        # 使用numpy的minimum函数
+        result_data = np.minimum(self.data, other.data)
+        result = Tensor(result_data, device=self.device)
+
+        # 梯度计算
+        if self.requires_grad or (hasattr(other, 'requires_grad') and other.requires_grad):
+            result.requires_grad = True
+
+            def backward_fn(grad):
+                self_grad = None
+                other_grad = None
+
+                if self.requires_grad:
+                    # 对于self: 当self <= other时，梯度为grad，否则为0
+                    mask_self = (self.data <= other.data).astype(np.float32)
+                    self_grad = grad * mask_self
+
+                if hasattr(other, 'requires_grad') and other.requires_grad:
+                    # 对于other: 当other < self时，梯度为grad，否则为0
+                    mask_other = (other.data < self.data).astype(np.float32)
+                    other_grad = grad * mask_other
+
+                return self_grad, other_grad
+
+            result._backward_fn = backward_fn
+            result._parents = [self] + ([other] if hasattr(other, 'requires_grad') and other.requires_grad else [])
+
+        return result
 # ==================== 便利函数 ====================
 
 def tensor(data, requires_grad=False, device='cpu', dtype=np.float32):
@@ -862,3 +1650,44 @@ def eye(n, requires_grad=False, device='cpu', dtype=np.float32):
     else:
         data = np.eye(n, dtype=dtype)
     return Tensor(data, requires_grad=requires_grad, device=device)
+
+# 在模块级别定义（不在Tensor类内）：
+def cat(tensors, dim=0):
+    """连接张量的静态函数"""
+    if not tensors:
+        raise ValueError("Cannot concatenate empty list of tensors")
+
+    if len(tensors) == 1:
+        return tensors[0]
+
+    # 确保所有输入都是Tensor
+    tensors = [t if isinstance(t, Tensor) else Tensor(t) for t in tensors]
+    first_tensor = tensors[0]
+    xp = first_tensor._get_array_module()
+
+    # 执行连接
+    tensor_data = [t.data for t in tensors]
+    result_data = xp.concatenate(tensor_data, axis=dim)
+
+    requires_grad = any(t.requires_grad for t in tensors)
+    out = Tensor(result_data, requires_grad=requires_grad, device=first_tensor.device)
+
+    if requires_grad:
+        def _cat_backward():
+            if out.grad is None:
+                return
+            start_idx = 0
+            for tensor in tensors:
+                if tensor.requires_grad:
+                    if tensor.grad is None:
+                        tensor.grad = zeros(*tensor.shape, device=tensor.device)
+
+                    end_idx = start_idx + tensor.shape[dim]
+                    slices = [slice(None)] * out.ndim
+                    slices[dim] = slice(start_idx, end_idx)
+                    tensor.grad.data += out.grad.data[tuple(slices)]
+                    start_idx = end_idx
+
+        out._backward = _cat_backward
+
+    return out

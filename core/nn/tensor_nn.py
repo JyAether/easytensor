@@ -10,6 +10,35 @@ class Module:
         self.training = True
         self._parameters = []
 
+    def __call__(self, *args, **kwargs):
+        """使模型可调用，自动调用forward方法"""
+        return self.forward(*args, **kwargs)
+
+    def forward(self, *args, **kwargs):
+        """前向传播方法，子类必须实现"""
+        raise NotImplementedError("Subclasses must implement forward method")
+
+    # def __setattr__(self, name, value):
+    #     """重写属性设置，自动注册子模块和参数"""
+    #     if isinstance(value, Module):
+    #         self._modules[name] = value
+    #     elif isinstance(value, Tensor) and hasattr(value, 'requires_grad') and value.requires_grad:
+    #         self._parameters[name] = value
+    #     super().__setattr__(name, value)
+    #
+    # def __getattr__(self, name):
+    #     """重写属性获取"""
+    #     if '_modules' in self.__dict__:
+    #         modules = self.__dict__['_modules']
+    #         if name in modules:
+    #             return modules[name]
+    #     if '_parameters' in self.__dict__:
+    #         parameters = self.__dict__['_parameters']
+    #         if name in parameters:
+    #             return parameters[name]
+    #     raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+
     def parameters(self):
         """返回模块的所有参数"""
         params = []
@@ -470,7 +499,15 @@ class MSELoss(Loss):
 
 
 class CrossEntropyLoss(Loss):
-    """交叉熵损失（改进版本）"""
+    """多分类交叉熵损失函数
+
+    适用于多分类问题，自动应用softmax + logist
+    计算公式: CE = -log(softmax(logits)[target_class])
+
+    Args:
+        reduction: 'mean', 'sum', 'none'
+        ignore_index: 忽略的类别索引（可选）
+    """
 
     def __init__(self, reduction='mean'):
         super().__init__()
@@ -652,6 +689,17 @@ def init_weights(module, init_type='xavier'):
 
         if module.bias is not None:
             module.bias.data = np.zeros_like(module.bias.data)
+
+def init_weights(weight,in_features, out_features,init_type='xavier'):
+    """权重初始化"""
+    if init_type == 'xavier':
+        std = np.sqrt(2.0 / (in_features + out_features))
+        weight = np.random.randn(*weight.shape) * std
+    elif init_type == 'he':
+        std = np.sqrt(2.0 / in_features)
+        weight = np.random.randn(*weight.shape) * std
+    elif init_type == 'normal':
+        weight = np.random.randn(*weight.shape) * 0.01
 
 
 # ==================== 示例使用 ====================
