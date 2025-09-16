@@ -53,6 +53,33 @@ class Module:
                         params.extend(item.parameters())
         return params
 
+    def count_parameters(self):
+        """统计模型的总参数数量"""
+        total_params = 0
+        for param in self.parameters():
+            total_params += np.prod(param.shape)
+        return total_params
+
+    def parameter_summary(self):
+        """详细的参数统计信息"""
+        params = self.parameters()
+        total_params = 0
+        trainable_params = 0
+
+        print("参数详细信息:")
+        print("-" * 60)
+        for i, param in enumerate(params):
+            param_count = np.prod(param.shape)
+            total_params += param_count
+            if param.requires_grad:
+                trainable_params += param_count
+            print(f"参数 {i + 1}: 形状 {param.shape}, 数量 {param_count:,}")
+
+        print("-" * 60)
+        print(f"总参数数量: {total_params:,}")
+        print(f"可训练参数数量: {trainable_params:,}")
+        return total_params
+
     def zero_grad(self):
         """清零所有参数的梯度"""
         for param in self.parameters():
@@ -763,4 +790,4 @@ if __name__ == "__main__":
     optimizer.step()
     optimizer.zero_grad()
 
-    print("\n优化完成！")
+    print("\n完成！")

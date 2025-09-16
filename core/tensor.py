@@ -511,19 +511,42 @@ class Tensor:
         return out
 
     def matmul(self, other):
-        """矩阵乘法"""
+        """矩阵乘法 - 支持各种维度组合"""
         other = self._ensure_tensor(other)
         xp = self._get_array_module()
 
-        # 检查维度兼容性
-        if self.ndim < 2 or other.ndim < 2:
-            raise ValueError(
-                f"matmul requires both tensors to have at least 2 dimensions, got {self.ndim} and {other.ndim}")
+        # 记录原始形状用于反向传播
+        self_original_shape = self.shape
+        other_original_shape = other.shape
 
-        if self.shape[-1] != other.shape[-2]:
-            raise ValueError(f"matmul dimension mismatch: {self.shape[-1]} != {other.shape[-2]}")
+        # 处理不同的维度组合
+        if self.ndim == 1 and other.ndim == 1:
+            # 向量点积
+            if self.shape[0] != other.shape[0]:
+                raise ValueError(f"Vector dot product dimension mismatch: {self.shape[0]} != {other.shape[0]}")
+            result_data = xp.dot(self.data, other.data)
 
-        result_data = xp.matmul(self.data, other.data)
+        elif self.ndim == 1 and other.ndim == 2:
+            # 行向量 × 矩阵: (n,) × (n, m) -> (m,)
+            if self.shape[0] != other.shape[0]:
+                raise ValueError(f"matmul dimension mismatch: {self.shape[0]} != {other.shape[0]}")
+            result_data = xp.dot(self.data, other.data)
+
+        elif self.ndim == 2 and other.ndim == 1:
+            # 矩阵 × 列向量: (m, n) × (n,) -> (m,)
+            if self.shape[1] != other.shape[0]:
+                raise ValueError(f"matmul dimension mismatch: {self.shape[1]} != {other.shape[0]}")
+            result_data = xp.dot(self.data, other.data)
+
+        elif self.ndim >= 2 and other.ndim >= 2:
+            # 标准矩阵乘法
+            if self.shape[-1] != other.shape[-2]:
+                raise ValueError(f"matmul dimension mismatch: {self.shape[-1]} != {other.shape[-2]}")
+            result_data = xp.matmul(self.data, other.data)
+
+        else:
+            raise ValueError(f"Unsupported matmul dimensions: {self.ndim}D @ {other.ndim}D")
+
         out = Tensor(
             result_data,
             requires_grad=self.requires_grad or other.requires_grad,
@@ -535,18 +558,90 @@ class Tensor:
         def _backward():
             if self.requires_grad:
                 self._init_grad_if_needed()
-                # self.grad += out.grad @ other.T
-                grad = xp.matmul(out.grad.data, xp.swapaxes(other.data, -2, -1))
-                self.grad.data += grad
+
+                # 根据原始维度组合计算梯度
+                if len(self_original_shape) == 1 and len(other_original_shape) == 1:
+                    # 向量点积的梯度
+                    self.grad.data += out.grad.data * other.data
+
+                elif len(self_original_shape) == 1 and len(other_original_shape) == 2:
+                    # 行向量 × 矩阵的梯度: grad_self = out.grad @ other.T
+                    grad = xp.dot(out.grad.data, other.data.T)
+                    self.grad.data += grad
+
+                elif len(self_original_shape) == 2 and len(other_original_shape) == 1:
+                    # 矩阵 × 列向量的梯度: grad_self = out.grad @ other.T (列向量转行向量)
+                    grad = xp.outer(out.grad.data, other.data)
+                    self.grad.data += grad
+
+                else:
+                    # 标准矩阵乘法的梯度
+                    grad = xp.matmul(out.grad.data, xp.swapaxes(other.data, -2, -1))
+                    self.grad.data += grad
 
             if other.requires_grad:
                 other._init_grad_if_needed()
-                # other.grad += self.T @ out.grad
-                grad = xp.matmul(xp.swapaxes(self.data, -2, -1), out.grad.data)
-                other.grad.data += grad
+
+                # 根据原始维度组合计算梯度
+                if len(self_original_shape) == 1 and len(other_original_shape) == 1:
+                    # 向量点积的梯度
+                    other.grad.data += out.grad.data * self.data
+
+                elif len(self_original_shape) == 1 and len(other_original_shape) == 2:
+                    # 行向量 × 矩阵的梯度: grad_other = self.T @ out.grad (转置后外积)
+                    grad = xp.outer(self.data, out.grad.data)
+                    other.grad.data += grad
+
+                elif len(self_original_shape) == 2 and len(other_original_shape) == 1:
+                    # 矩阵 × 列向量的梯度: grad_other = self.T @ out.grad
+                    grad = xp.dot(self.data.T, out.grad.data)
+                    other.grad.data += grad
+
+                else:
+                    # 标准矩阵乘法的梯度
+                    grad = xp.matmul(xp.swapaxes(self.data, -2, -1), out.grad.data)
+                    other.grad.data += grad
 
         out._backward = _backward
         return out
+
+    # def matmul(self, other):
+    #     """矩阵乘法"""
+    #     other = self._ensure_tensor(other)
+    #     xp = self._get_array_module()
+    #
+    #     # 检查维度兼容性
+    #     if self.ndim < 2 or other.ndim < 2:
+    #         raise ValueError(
+    #             f"matmul requires both tensors to have at least 2 dimensions, got {self.ndim} and {other.ndim}")
+    #
+    #     if self.shape[-1] != other.shape[-2]:
+    #         raise ValueError(f"matmul dimension mismatch: {self.shape[-1]} != {other.shape[-2]}")
+    #
+    #     result_data = xp.matmul(self.data, other.data)
+    #     out = Tensor(
+    #         result_data,
+    #         requires_grad=self.requires_grad or other.requires_grad,
+    #         device=self.device,
+    #         _children=(self, other),
+    #         _op='@'
+    #     )
+    #
+    #     def _backward():
+    #         if self.requires_grad:
+    #             self._init_grad_if_needed()
+    #             # self.grad += out.grad @ other.T
+    #             grad = xp.matmul(out.grad.data, xp.swapaxes(other.data, -2, -1))
+    #             self.grad.data += grad
+    #
+    #         if other.requires_grad:
+    #             other._init_grad_if_needed()
+    #             # other.grad += self.T @ out.grad
+    #             grad = xp.matmul(xp.swapaxes(self.data, -2, -1), out.grad.data)
+    #             other.grad.data += grad
+    #
+    #     out._backward = _backward
+    #     return out
 
     def __matmul__(self, other):
         """矩阵乘法操作符 @"""
