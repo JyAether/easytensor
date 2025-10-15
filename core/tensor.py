@@ -673,6 +673,81 @@ class Tensor:
 
         return out
 
+    def softmax(self, dim=-1):
+        """
+        Softmax激活函数
+        softmax(x_i) = exp(x_i) / sum(exp(x_j)) for all j
+
+        Args:
+            dim: 计算softmax的维度，默认为-1（最后一个维度）
+        """
+        xp = self._get_array_module()
+
+        # 为了数值稳定性，减去最大值
+        max_vals = self.max(axis=dim, keepdims=True)
+        shifted = self - max_vals
+
+        # 计算指数
+        exp_vals = shifted.exp()
+
+        # 计算softmax
+        sum_exp = exp_vals.sum(axis=dim, keepdims=True)
+        result = exp_vals / sum_exp
+
+        # 设置梯度计算
+        if self.requires_grad:
+            def _softmax_backward():
+                if self.grad is None:
+                    self.grad = zeros(*self.shape, device=self.device)
+                if result.grad is not None:
+                    # softmax的梯度: softmax * (grad - sum(softmax * grad))
+                    # 沿着softmax维度计算
+                    softmax_grad_sum = (result.data * result.grad.data).sum(axis=dim, keepdims=True)
+                    grad_input = result.data * (result.grad.data - softmax_grad_sum)
+                    self.grad.data += grad_input
+
+            result._backward = _softmax_backward
+
+        return result
+
+    def log_softmax(self, dim=-1):
+        """
+        Log-Softmax函数，数值更稳定的log(softmax(x))
+        log_softmax(x_i) = x_i - log(sum(exp(x_j))) for all j
+
+        Args:
+            dim: 计算log_softmax的维度，默认为-1（最后一个维度）
+        """
+        xp = self._get_array_module()
+
+        # 为了数值稳定性，减去最大值
+        max_vals = self.max(axis=dim, keepdims=True)
+        shifted = self - max_vals
+
+        # 计算log_sum_exp
+        exp_vals = shifted.exp()
+        sum_exp = exp_vals.sum(axis=dim, keepdims=True)
+        log_sum_exp = sum_exp.log()
+
+        # log_softmax = shifted - log_sum_exp
+        result = shifted - log_sum_exp
+
+        if self.requires_grad:
+            def _log_softmax_backward():
+                if self.grad is None:
+                    self.grad = zeros(*self.shape, device=self.device)
+                if result.grad is not None:
+                    # log_softmax的梯度: grad - softmax * sum(grad)
+                    softmax_vals = exp_vals / sum_exp
+                    grad_sum = result.grad.data.sum(axis=dim, keepdims=True)
+                    grad_input = result.grad.data - softmax_vals.data * grad_sum
+                    self.grad.data += grad_input
+
+            result._backward = _log_softmax_backward
+
+        return result
+
+
     # ==================== 形状操作 ====================
 
     def reshape(self, *shape):
